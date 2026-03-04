@@ -66,10 +66,14 @@ workflow {
       .splitCsv(header: true)
       .map { row ->
         assert row.condition && row.rep1_peaks && row.rep2_peaks : 'consensus_pairs_csv must contain: condition,rep1_peaks,rep2_peaks'
+        def p1 = file(row.rep1_peaks.toString().trim())
+        def p2 = file(row.rep2_peaks.toString().trim())
+        assert p1.exists() : "rep1_peaks not found for ${row.condition}: ${p1}"
+        assert p2.exists() : "rep2_peaks not found for ${row.condition}: ${p2}"
         tuple(
           row.condition.toString().trim(),
-          file(row.rep1_peaks.toString().trim()),
-          file(row.rep2_peaks.toString().trim())
+          p1,
+          p2
         )
       }
   } else if (params.samples_master) {
@@ -122,6 +126,7 @@ workflow {
           ra <=> rb
         }
         if (ordered.size() < 2) return
+        assert ordered.size() == 2 : "Consensus currently expects exactly 2 enabled ChIP replicates per condition. Condition '${cond}' has ${ordered.size()}."
 
         def s1 = ordered[0].sample_id?.toString()?.trim()
         def s2 = ordered[1].sample_id?.toString()?.trim()
