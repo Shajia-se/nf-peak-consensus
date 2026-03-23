@@ -4,11 +4,12 @@ Nextflow DSL2 module for condition-level consensus peaks using `bedtools interse
 
 ## What it does
 
-For each condition:
+For each configured MACS3 consensus profile and each condition:
 - selects two replicates
 - sorts both peak BED/narrowPeak files
 - finds reciprocal overlaps with `bedtools intersect -f 0.7 -r`
 - merges overlapping intervals into one consensus BED
+- merges all condition-level consensus beds into one `universe_peaks.bed`
 
 ## Input modes
 
@@ -27,20 +28,24 @@ Optional columns used:
 - `is_control`
 - `enabled`
 
-Default MACS3 profile used:
+Default MACS3 profiles used:
 - `strict_q0.01`
+- `consensus_q0.05`
 
 Resolved peak path:
-- `${macs3_output}/${consensus_macs3_profile}/${sample_id}_peaks.${consensus_peak_ext}`
+- `${macs3_output}/${profile_name}/${sample_id}_peaks.${consensus_peak_ext}`
 
 ## Outputs
 
-Per condition:
+Under `${project_folder}/${peak_consensus_output}/${profile_name}`:
+
 - `${condition}_rep1.sorted.bed`
 - `${condition}_rep2.sorted.bed`
 - `${condition}_overlap_pairs.bed`
 - `${condition}_consensus.bed`
 - `${condition}_consensus.summary.tsv`
+- `universe_peaks.bed`
+- `universe_peaks.summary.tsv`
 
 ## Run
 

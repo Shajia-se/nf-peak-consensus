@@ -9,16 +9,17 @@ def resolveBaseDir = { p ->
 }
 
 process peak_consensus_per_condition {
-  tag "${condition}"
+  tag "${profile_name}:${condition}"
   stageInMode 'symlink'
   stageOutMode 'move'
 
-  publishDir "${params.project_folder}/${peak_consensus_output}", mode: 'copy', overwrite: true
+  publishDir { "${params.project_folder}/${peak_consensus_output}/${profile_name}" }, mode: 'copy', overwrite: true
 
   input:
-    tuple val(condition), path(rep1_peak), path(rep2_peak)
+    tuple val(profile_name), val(condition), path(rep1_peak), path(rep2_peak)
 
   output:
+    tuple val(profile_name), path("${condition}_consensus.bed"), emit: consensus_for_universe
     path("${condition}_rep1.sorted.bed")
     path("${condition}_rep2.sorted.bed")
     path("${condition}_overlap_pairs.bed")
@@ -50,31 +51,70 @@ process peak_consensus_per_condition {
   consensus_n=\$(wc -l < ${condition}_consensus.bed || echo 0)
 
   cat > ${condition}_consensus.summary.tsv << TSV
-condition\trep1_peaks\trep2_peaks\toverlap_pairs\tconsensus_peaks\treciprocal_overlap
-${condition}\t\${rep1_n}\t\${rep2_n}\t\${overlap_n}\t\${consensus_n}\t${recip}
+profile\tcondition\trep1_peaks\trep2_peaks\toverlap_pairs\tconsensus_peaks\treciprocal_overlap
+${profile_name}\t${condition}\t\${rep1_n}\t\${rep2_n}\t\${overlap_n}\t\${consensus_n}\t${recip}
+TSV
+  """
+}
+
+process build_universe_peaks {
+  tag "${profile_name}"
+  stageInMode 'symlink'
+  stageOutMode 'move'
+
+  publishDir { "${params.project_folder}/${peak_consensus_output}/${profile_name}" }, mode: 'copy', overwrite: true
+
+  input:
+    tuple val(profile_name), path(consensus_beds)
+
+  output:
+    path("universe_peaks.bed")
+    path("universe_peaks.summary.tsv")
+
+  script:
+  def bedArgs = consensus_beds.collect { "\"${it}\"" }.join(' ')
+  def nInputs = consensus_beds.size()
+  """
+  set -euo pipefail
+
+  cat ${bedArgs} \
+    | awk 'BEGIN{OFS="\\t"} NF >= 3 {print \$1,\$2,\$3}' \
+    | sort -k1,1 -k2,2n \
+    | bedtools merge -i - > universe_peaks.bed
+
+  n_universe=\$(wc -l < universe_peaks.bed || echo 0)
+
+  cat > universe_peaks.summary.tsv << TSV
+profile\tn_consensus_inputs\tn_universe_peaks
+${profile_name}\t${nInputs}\t\${n_universe}
 TSV
   """
 }
 
 workflow {
   def peakExt = (params.consensus_peak_ext ?: 'narrowPeak').toString()
+  def profiles = (params.consensus_profiles ?: params.consensus_macs3_profile ?: 'strict_q0.01')
+    .toString()
+    .split(',')
+    *.trim()
+    .findAll { it }
+    .unique()
   def rows
 
   if (params.consensus_pairs_csv && file(params.consensus_pairs_csv).exists()) {
     rows = Channel
       .fromPath(params.consensus_pairs_csv, checkIfExists: true)
       .splitCsv(header: true)
-      .map { row ->
+      .flatMap { row ->
         assert row.condition && row.rep1_peaks && row.rep2_peaks : 'consensus_pairs_csv must contain: condition,rep1_peaks,rep2_peaks'
         def p1 = file(row.rep1_peaks.toString().trim())
         def p2 = file(row.rep2_peaks.toString().trim())
         assert p1.exists() : "rep1_peaks not found for ${row.condition}: ${p1}"
         assert p2.exists() : "rep2_peaks not found for ${row.condition}: ${p2}"
-        tuple(
-          row.condition.toString().trim(),
-          p1,
-          p2
-        )
+        def rowProfiles = row.profile_name ? [row.profile_name.toString().trim()] : profiles
+        rowProfiles.collect { prof ->
+          tuple(prof, row.condition.toString().trim(), p1, p2)
+        }
       }
   } else if (params.samples_master) {
     def master = file(params.samples_master)
@@ -111,11 +151,8 @@ workflow {
     }
 
     def macsBase = resolveBaseDir(params.macs3_output)
-    def macsProfile = (params.consensus_macs3_profile ?: 'strict_q0.01').toString()
-    def peakDir = file("${macsBase}/${macsProfile}")
-    assert peakDir.exists() : "MACS3 profile output not found: ${peakDir}"
-
     def pairs = []
+
     records
       .findAll { rec -> isEnabled(rec) && isChip(rec) }
       .groupBy { rec -> rec.condition?.toString()?.trim() ?: 'NA' }
@@ -132,12 +169,15 @@ workflow {
         def s2 = ordered[1].sample_id?.toString()?.trim()
         if (!s1 || !s2) return
 
-        def p1 = file("${peakDir}/${s1}_peaks.${peakExt}")
-        def p2 = file("${peakDir}/${s2}_peaks.${peakExt}")
-        assert p1.exists() : "Peak file not found for ${s1}: ${p1}"
-        assert p2.exists() : "Peak file not found for ${s2}: ${p2}"
-
-        pairs << tuple(cond, p1, p2)
+        profiles.each { prof ->
+          def peakDir = file("${macsBase}/${prof}")
+          assert peakDir.exists() : "MACS3 profile output not found: ${peakDir}"
+          def p1 = file("${peakDir}/${s1}_peaks.${peakExt}")
+          def p2 = file("${peakDir}/${s2}_peaks.${peakExt}")
+          assert p1.exists() : "Peak file not found for ${s1} in profile ${prof}: ${p1}"
+          assert p2.exists() : "Peak file not found for ${s2} in profile ${prof}: ${p2}"
+          pairs << tuple(prof, cond, p1, p2)
+        }
       }
 
     rows = Channel
@@ -147,9 +187,22 @@ workflow {
     exit 1, 'ERROR: Provide --consensus_pairs_csv or --samples_master.'
   }
 
-  def filtered = rows.filter { condition, rep1_peak, rep2_peak ->
-    !file("${params.project_folder}/${peak_consensus_output}/${condition}_consensus.bed").exists()
+  def filtered = rows.filter { profile_name, condition, rep1_peak, rep2_peak ->
+    !file("${params.project_folder}/${peak_consensus_output}/${profile_name}/${condition}_consensus.bed").exists()
   }
 
-  peak_consensus_per_condition(filtered)
+  def consensus_out = peak_consensus_per_condition(filtered)
+
+  def existing_consensus = rows
+    .map { profile_name, condition, rep1_peak, rep2_peak ->
+      tuple(profile_name, file("${params.project_folder}/${peak_consensus_output}/${profile_name}/${condition}_consensus.bed"))
+    }
+    .filter { profile_name, bed -> bed.exists() }
+
+  def universe_in = existing_consensus
+    .mix(consensus_out.consensus_for_universe)
+    .groupTuple()
+    .map { profile_name, beds -> tuple(profile_name, beds) }
+
+  build_universe_peaks(universe_in)
 }
