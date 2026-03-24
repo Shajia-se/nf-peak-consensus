@@ -70,6 +70,8 @@ process build_universe_peaks {
   output:
     path("universe_peaks.bed")
     path("universe_peaks.summary.tsv")
+    path("consensus_first_universe_peaks.bed", optional: true)
+    path("consensus_first_universe_peaks.summary.tsv", optional: true)
 
   script:
   def bedArgs = consensus_beds.collect { "\"${it}\"" }.join(' ')
@@ -88,12 +90,60 @@ process build_universe_peaks {
 profile\tn_consensus_inputs\tn_universe_peaks
 ${profile_name}\t${nInputs}\t\${n_universe}
 TSV
+
+  if [[ "${profile_name}" == "consensus_q0.05" ]]; then
+    cp universe_peaks.bed consensus_first_universe_peaks.bed
+    cat > consensus_first_universe_peaks.summary.tsv << TSV
+universe_type\tprofile\tn_consensus_inputs\tn_universe_peaks\tconstruction
+consensus_first\t${profile_name}\t${nInputs}\t\${n_universe}\twithin_condition_reciprocal_overlap_then_across_condition_merge
+TSV
+  fi
+  """
+}
+
+process build_direct_union_universe {
+  tag "${profile_name}"
+  stageInMode 'symlink'
+  stageOutMode 'move'
+
+  publishDir { "${params.project_folder}/${peak_consensus_output}/${profile_name}" }, mode: 'copy', overwrite: true
+
+  input:
+    tuple val(profile_name), path(sample_peak_beds)
+
+  output:
+    path("union_first_universe_peaks.bed")
+    path("union_first_universe_peaks.summary.tsv")
+
+  script:
+  def bedArgs = sample_peak_beds.collect { "\"${it}\"" }.join(' ')
+  def nInputs = sample_peak_beds.size()
+  """
+  set -euo pipefail
+
+  cat ${bedArgs} \
+    | awk 'BEGIN{OFS="\\t"} NF >= 3 {print \$1,\$2,\$3}' \
+    | sort -k1,1 -k2,2n \
+    | bedtools merge -i - > union_first_universe_peaks.bed
+
+  n_union=\$(wc -l < union_first_universe_peaks.bed || echo 0)
+
+  cat > union_first_universe_peaks.summary.tsv << TSV
+universe_type\tprofile\tn_sample_inputs\tn_universe_peaks\tconstruction
+direct_union\t${profile_name}\t${nInputs}\t\${n_union}\tall_sample_q0.05_peaks_cat_sort_merge
+TSV
   """
 }
 
 workflow {
   def peakExt = (params.consensus_peak_ext ?: 'narrowPeak').toString()
   def profiles = (params.consensus_profiles ?: params.consensus_macs3_profile ?: 'strict_q0.01')
+    .toString()
+    .split(',')
+    *.trim()
+    .findAll { it }
+    .unique()
+  def directUnionProfiles = (params.direct_union_profiles ?: 'consensus_q0.05')
     .toString()
     .split(',')
     *.trim()
@@ -205,4 +255,24 @@ workflow {
     .map { profile_name, beds -> tuple(profile_name, beds) }
 
   build_universe_peaks(universe_in)
+
+  def direct_union_in = rows
+    .filter { profile_name, condition, rep1_peak, rep2_peak ->
+      directUnionProfiles.contains(profile_name)
+    }
+    .flatMap { profile_name, condition, rep1_peak, rep2_peak ->
+      [tuple(profile_name, rep1_peak), tuple(profile_name, rep2_peak)]
+    }
+    .groupTuple()
+    .map { profile_name, peaks ->
+      def uniq = []
+      def seen = [] as Set
+      peaks.each { p ->
+        def key = p.toString()
+        if (seen.add(key)) uniq << p
+      }
+      tuple(profile_name, uniq)
+    }
+
+  build_direct_union_universe(direct_union_in)
 }
